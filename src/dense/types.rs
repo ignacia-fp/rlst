@@ -420,7 +420,7 @@ impl_scalar!(f32, c32);
 impl_scalar!(f64, c64);
 
 /// Transposition Mode.
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 pub enum TransMode {
     /// No modification of matrix.
     NoTrans,
@@ -442,7 +442,7 @@ pub enum TriangularType {
 }
 
 /// Defines the side through which the upper or lower triangular matrix acts
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Side {
     /// Left side
     Left,
