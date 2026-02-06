@@ -1,7 +1,5 @@
 //! Eigenvalues
-use crate::dense::linalg::naupd::NonSymmetricArnoldiUpdate;
-use crate::dense::linalg::neupd::NonSymmetricArnoldiExtract;
-use crate::dense::types::RlstScalar;
+/*use crate::dense::types::RlstScalar;
 use crate::operator::operations::eigenvalues::split::xslice_yslice;
 use crate::operator::space::element::ElementImpl;
 use crate::operator::{AsApply, Operator};
@@ -53,6 +51,7 @@ pub enum Mode {
     /// Cayley transformation
     Cayley,
 }
+
 
 impl<Space, OpImpl> Eigs<Space, OpImpl>
 where
@@ -256,3 +255,4 @@ where
         return (vals, vecs);
     }
 }
+*/

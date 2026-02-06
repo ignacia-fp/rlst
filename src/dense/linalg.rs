@@ -10,8 +10,6 @@ pub mod givens_rotation;
 pub mod interpolative_decomposition;
 pub mod inverse;
 pub mod lu;
-pub mod naupd;
-pub mod neupd;
 pub mod null_space;
 pub mod pseudo_inverse;
 pub mod qr;
