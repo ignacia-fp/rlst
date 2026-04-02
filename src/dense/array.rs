@@ -279,6 +279,10 @@ impl<
     fn resize_in_place(&mut self, shape: [usize; NDIM]) {
         self.0.resize_in_place(shape)
     }
+
+    fn resize_for_overwrite_in_place(&mut self, shape: [usize; NDIM]) {
+        self.0.resize_for_overwrite_in_place(shape)
+    }
 }
 
 /// Create an empty array of given type and dimension.

@@ -152,7 +152,11 @@ impl<
         let expected_shape = [shapea[0], shapeb[1]];
 
         if self.shape() != expected_shape {
-            self.resize_in_place(expected_shape);
+            if beta.is_zero() {
+                self.resize_for_overwrite_in_place(expected_shape);
+            } else {
+                self.resize_in_place(expected_shape);
+            }
         }
 
         crate::dense::matrix_multiply::matrix_multiply(
@@ -191,7 +195,11 @@ impl<
         let expected_shape = [shapea[0]];
 
         if self.shape() != expected_shape {
-            self.resize_in_place(expected_shape);
+            if beta.is_zero() {
+                self.resize_for_overwrite_in_place(expected_shape);
+            } else {
+                self.resize_in_place(expected_shape);
+            }
         }
 
         let mut self_with_padded_dim = self.r_mut().insert_empty_axis(AxisPosition::Back);
@@ -239,7 +247,11 @@ impl<
         let expected_shape = [shapeb[1]];
 
         if self.shape() != expected_shape {
-            self.resize_in_place(expected_shape);
+            if beta.is_zero() {
+                self.resize_for_overwrite_in_place(expected_shape);
+            } else {
+                self.resize_in_place(expected_shape);
+            }
         }
 
         let mut self_with_padded_dim = self.r_mut().insert_empty_axis(AxisPosition::Front);

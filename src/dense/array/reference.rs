@@ -305,6 +305,11 @@ impl<
     fn resize_in_place(&mut self, shape: [usize; NDIM]) {
         self.arr.resize_in_place(shape)
     }
+
+    #[inline]
+    fn resize_for_overwrite_in_place(&mut self, shape: [usize; NDIM]) {
+        self.arr.resize_for_overwrite_in_place(shape)
+    }
 }
 
 impl<

@@ -129,7 +129,7 @@ impl<
         Self: ResizeInPlace<NDIM>,
     {
         if self.shape() != other.shape() {
-            self.resize_in_place(other.shape());
+            self.resize_for_overwrite_in_place(other.shape());
         }
 
         self.fill_from(other)
@@ -173,7 +173,7 @@ impl<
         Self: ResizeInPlace<NDIM>,
     {
         if self.shape() != other.shape() {
-            self.resize_in_place(other.shape());
+            self.resize_for_overwrite_in_place(other.shape());
         }
 
         self.fill_from_chunked::<_, N>(other)

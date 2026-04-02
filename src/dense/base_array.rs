@@ -184,4 +184,11 @@ impl<Item: RlstBase, Data: ResizeableDataContainerMut<Item = Item>, const NDIM: 
         self.stride = stride_from_shape(shape);
         self.shape = shape;
     }
+
+    fn resize_for_overwrite_in_place(&mut self, shape: [usize; NDIM]) {
+        let new_len = shape.iter().product();
+        self.data.resize_for_overwrite(new_len);
+        self.stride = stride_from_shape(shape);
+        self.shape = shape;
+    }
 }

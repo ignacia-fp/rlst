@@ -54,6 +54,11 @@ pub trait DataContainerMut: DataContainer {
 pub trait ResizeableDataContainerMut: DataContainerMut {
     /// Resize the data container.
     fn resize(&mut self, new_len: usize);
+
+    /// Resize the data container when all entries will be overwritten immediately.
+    fn resize_for_overwrite(&mut self, new_len: usize) {
+        self.resize(new_len);
+    }
 }
 
 /// A container that uses dynamic vectors.
@@ -157,6 +162,19 @@ impl<Item: RlstBase> DataContainerMut for VectorContainer<Item> {
 impl<Item: RlstBase> ResizeableDataContainerMut for VectorContainer<Item> {
     fn resize(&mut self, new_len: usize) {
         self.data.resize(new_len, <Item as Default>::default());
+    }
+
+    fn resize_for_overwrite(&mut self, new_len: usize) {
+        if new_len <= self.data.len() {
+            self.data.truncate(new_len);
+        } else {
+            self.data.reserve(new_len - self.data.len());
+            // SAFETY: `Item` is `Copy` and the callers using this fast path
+            // overwrite every element before any read can occur.
+            unsafe {
+                self.data.set_len(new_len);
+            }
+        }
     }
 }
 

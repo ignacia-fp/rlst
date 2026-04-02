@@ -43,6 +43,11 @@ pub trait NumberOfElements {
 pub trait ResizeInPlace<const NDIM: usize> {
     /// Resize an operator in place
     fn resize_in_place(&mut self, shape: [usize; NDIM]);
+
+    /// Resize an operator in place when every entry will be overwritten immediately.
+    fn resize_for_overwrite_in_place(&mut self, shape: [usize; NDIM]) {
+        self.resize_in_place(shape);
+    }
 }
 
 /// Multiply into

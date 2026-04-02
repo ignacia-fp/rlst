@@ -3,6 +3,7 @@
 use paste::paste;
 use rlst::assert_array_abs_diff_eq;
 use rlst::assert_array_relative_eq;
+use rlst::dense::linalg::interpolative_decomposition::{Accuracy, MatrixIdDecomposition};
 use rlst::dense::linalg::qr::Pivoting;
 use rlst::prelude::*;
 
@@ -327,6 +328,73 @@ implement_qr_tests!(f32, 1E-5);
 implement_qr_tests!(f64, 1E-10);
 implement_qr_tests!(c32, 1E-4);
 implement_qr_tests!(c64, 1E-10);
+
+fn build_row_rank_two_matrix() -> DynamicArray<f64, 2> {
+    let mut arr = rlst_dynamic_array2!(f64, [5, 8]);
+
+    for col in 0..8 {
+        arr[[0, col]] = (col + 1) as f64;
+        arr[[1, col]] = if col % 2 == 0 { 1.0 } else { -1.0 };
+    }
+
+    for col in 0..8 {
+        arr[[2, col]] = 2.0 * arr[[0, col]] - arr[[1, col]];
+        arr[[3, col]] = -0.5 * arr[[0, col]] + 3.0 * arr[[1, col]];
+        arr[[4, col]] = 0.25 * arr[[0, col]] + 0.5 * arr[[1, col]];
+    }
+
+    arr
+}
+
+fn assert_id_reconstruction(arr: DynamicArray<f64, 2>, trans_mode: TransMode, tol: f64) {
+    let row_rank = 2;
+    let mut id_input = empty_array::<f64, 2>();
+
+    match trans_mode {
+        TransMode::NoTrans => id_input.fill_from_resize(arr.r()),
+        TransMode::Trans => id_input.fill_from_resize(arr.r().transpose()),
+        _ => panic!("Only NoTrans and Trans are covered by this regression test."),
+    }
+
+    let res = id_input
+        .r_mut()
+        .into_id_alloc(
+            Accuracy::FixedRank(row_rank),
+            RankRevealingQrType::RRQR,
+            trans_mode,
+        )
+        .unwrap();
+
+    assert_eq!(res.rank, row_rank);
+    assert_eq!(res.skel.shape(), [row_rank, arr.shape()[1]]);
+    assert_eq!(res.id_mat.shape(), [arr.shape()[0] - row_rank, row_rank]);
+
+    let mut perm_mat = rlst_dynamic_array2!(f64, [arr.shape()[0], arr.shape()[0]]);
+    res.get_p(perm_mat.r_mut());
+
+    let permuted = empty_array::<f64, 2>().simple_mult_into_resize(perm_mat.r(), arr.r());
+    let mut trailing = rlst_dynamic_array2!(f64, [arr.shape()[0] - row_rank, arr.shape()[1]]);
+    trailing.fill_from(
+        permuted.into_subview([row_rank, 0], [arr.shape()[0] - row_rank, arr.shape()[1]]),
+    );
+
+    let trailing_approx =
+        empty_array::<f64, 2>().simple_mult_into_resize(res.id_mat.r(), res.skel.r());
+
+    assert_array_abs_diff_eq!(trailing_approx, trailing, tol);
+}
+
+#[test]
+fn test_id_reconstructs_rows_no_trans() {
+    let arr = build_row_rank_two_matrix();
+    assert_id_reconstruction(arr, TransMode::NoTrans, 1E-12);
+}
+
+#[test]
+fn test_id_reconstructs_rows_trans() {
+    let arr = build_row_rank_two_matrix();
+    assert_id_reconstruction(arr, TransMode::Trans, 1E-12);
+}
 
 macro_rules! impl_tests {
         ($scalar:ty, $tol:expr) => {
