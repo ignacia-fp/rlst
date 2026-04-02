@@ -16,6 +16,7 @@ use core::f64;
 use std::cmp::min;
 use std::rc::Rc;
 
+/// Identity operator used as the default GMRES preconditioner.
 pub struct IdOperator<Space: IndexableSpace> {
     domain: Rc<Space>,
     range: Rc<Space>,
@@ -76,6 +77,7 @@ impl<Space: IndexableSpace> AsApply for IdOperator<Space> {
 }
 
 impl<Space: IndexableSpace> IdOperator<Space> {
+    /// Create a new identity operator between the given domain and range.
     pub fn new(domain: Rc<Space>, range: Rc<Space>) -> Self {
         IdOperator { domain, range }
     }
