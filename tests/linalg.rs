@@ -114,6 +114,69 @@ macro_rules! impl_lu_tests {
                     assert_array_relative_eq!(x_actual, rhs, $tol)
                 }
 
+                #[test]
+                fn [<test_lu_mul_vec_$scalar>]() {
+                    let dim = [12, 12];
+                    let mut arr = rlst_dynamic_array2!($scalar, dim);
+                    arr.fill_from_seed_equally_distributed(0);
+
+                    let mut x_expected = rlst_dynamic_array1!($scalar, [dim[0]]);
+                    x_expected.fill_from_seed_equally_distributed(1);
+
+                    let expected =
+                        empty_array::<$scalar, 1>().simple_mult_into_resize(arr.r(), x_expected.r());
+
+                    let lu = LuDecomposition::<$scalar, _>::new(arr).unwrap();
+                    lu.mul_vec(TransMode::NoTrans, x_expected.r_mut()).unwrap();
+
+                    assert_array_relative_eq!(expected, x_expected, $tol)
+                }
+
+                #[test]
+                fn [<test_lu_mul_mat_trans_$scalar>]() {
+                    let dim = [12, 12];
+                    let mut arr = rlst_dynamic_array2!($scalar, dim);
+                    arr.fill_from_seed_equally_distributed(0);
+
+                    let mut rhs = rlst_dynamic_array2!($scalar, [dim[0], 4]);
+                    rhs.fill_from_seed_equally_distributed(1);
+
+                    let mut arr_trans = rlst_dynamic_array2!($scalar, dim);
+                    arr_trans.fill_from_resize(arr.r().transpose());
+                    let expected = empty_array::<$scalar, 2>()
+                        .simple_mult_into_resize(arr_trans.r(), rhs.r());
+
+                    let lu = LuDecomposition::<$scalar, _>::new(arr).unwrap();
+                    lu.mul_mat(TransMode::Trans, rhs.r_mut()).unwrap();
+
+                    assert_array_relative_eq!(expected, rhs, $tol)
+                }
+
+                #[test]
+                fn [<test_square_lu_factors_reuse_$scalar>]() {
+                    let dim = [12, 12];
+                    let mut arr = rlst_dynamic_array2!($scalar, dim);
+                    arr.fill_from_seed_equally_distributed(0);
+
+                    let mut x_actual = rlst_dynamic_array1!($scalar, [dim[0]]);
+                    x_actual.fill_from_seed_equally_distributed(1);
+
+                    let expected =
+                        empty_array::<$scalar, 1>().simple_mult_into_resize(arr.r(), x_actual.r());
+
+                    let lu = LuDecomposition::<$scalar, _>::new(arr).unwrap();
+                    let lu_factors = lu.to_square_factors().unwrap();
+
+                    let mut rhs = rlst_dynamic_array1!($scalar, [dim[0]]);
+                    rhs.fill_from(expected.r());
+
+                    lu_factors.solve_vec(TransMode::NoTrans, rhs.r_mut()).unwrap();
+                    assert_array_relative_eq!(x_actual, rhs, $tol);
+
+                    lu_factors.mul_vec(TransMode::NoTrans, rhs.r_mut()).unwrap();
+                    assert_array_relative_eq!(expected, rhs, $tol);
+                }
+
 
 
                 #[test]

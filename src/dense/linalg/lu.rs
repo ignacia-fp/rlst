@@ -1,11 +1,14 @@
 //! LU Decomposition and linear system solves.
 use super::assert_lapack_stride;
+use super::triangular_arrays::{TriangularMatrix, TriangularOperations};
 use crate::dense::array::Array;
 use crate::dense::traits::{
     RandomAccessByValue, RawAccess, RawAccessMut, ResizeInPlace, Shape, Stride,
     UnsafeRandomAccessByRef, UnsafeRandomAccessByValue, UnsafeRandomAccessMut,
 };
-use crate::dense::types::{c32, c64, RlstError, RlstResult, RlstScalar, TransMode};
+use crate::dense::types::{
+    c32, c64, RlstError, RlstResult, RlstScalar, Side, TransMode, TriangularType,
+};
 use lapack::{cgetrf, cgetrs, dgetrf, dgetrs, sgetrf, sgetrs, zgetrf, zgetrs};
 use num::One;
 
@@ -101,6 +104,40 @@ pub trait MatrixLuDecomposition: Sized {
     fn solve_mat<
         ArrayImplMut: RawAccessMut<Item = Self::Item>
             + UnsafeRandomAccessByValue<2, Item = Self::Item>
+            + Shape<2>
+            + Stride<2>,
+    >(
+        &self,
+        trans: TransMode,
+        rhs: Array<Self::Item, ArrayImplMut, 2>,
+    ) -> RlstResult<()>;
+
+    /// Multiply a vector by the factorized matrix.
+    ///
+    /// The input vector is overwritten with `A * rhs`, `A^T * rhs`, or `A^H * rhs`,
+    /// depending on `trans`.
+    fn mul_vec<
+        ArrayImplMut: RawAccessMut<Item = Self::Item>
+            + UnsafeRandomAccessByValue<1, Item = Self::Item>
+            + UnsafeRandomAccessMut<1, Item = Self::Item>
+            + UnsafeRandomAccessByRef<1, Item = Self::Item>
+            + Shape<1>
+            + Stride<1>,
+    >(
+        &self,
+        trans: TransMode,
+        rhs: Array<Self::Item, ArrayImplMut, 1>,
+    ) -> RlstResult<()>;
+
+    /// Multiply multiple right-hand sides by the factorized matrix.
+    ///
+    /// The input array is overwritten with `A * rhs`, `A^T * rhs`, or `A^H * rhs`,
+    /// depending on `trans`.
+    fn mul_mat<
+        ArrayImplMut: RawAccessMut<Item = Self::Item>
+            + UnsafeRandomAccessByValue<2, Item = Self::Item>
+            + UnsafeRandomAccessMut<2, Item = Self::Item>
+            + UnsafeRandomAccessByRef<2, Item = Self::Item>
             + Shape<2>
             + Stride<2>,
     >(
@@ -211,6 +248,218 @@ pub struct LuDecomposition<
     ipiv: Vec<i32>,
 }
 
+/// Reusable square LU factors for repeated solves and multiplications.
+pub struct SquareLuFactors<Item: RlstScalar> {
+    l: TriangularMatrix<Item>,
+    u: TriangularMatrix<Item>,
+    perm: Vec<usize>,
+}
+
+impl<Item: RlstScalar> SquareLuFactors<Item>
+where
+    TriangularMatrix<Item>: TriangularOperations<Item = Item>,
+{
+    /// Create reusable square factors from an LU decomposition.
+    pub fn from_lu<
+        ArrayImpl: UnsafeRandomAccessByValue<2, Item = Item>
+            + Stride<2>
+            + Shape<2>
+            + RawAccessMut<Item = Item>,
+    >(
+        lu: &LuDecomposition<Item, ArrayImpl>,
+    ) -> RlstResult<Self>
+    where
+        LuDecomposition<Item, ArrayImpl>: MatrixLuDecomposition<Item = Item>,
+    {
+        assert_eq!(lu.arr.shape()[0], lu.arr.shape()[1]);
+        let n = lu.arr.shape()[0];
+
+        let mut l_mat = crate::rlst_dynamic_array2!(Item, [n, n]);
+        let mut u_mat = crate::rlst_dynamic_array2!(Item, [n, n]);
+        <LuDecomposition<Item, ArrayImpl> as MatrixLuDecomposition>::get_l(lu, l_mat.r_mut());
+        <LuDecomposition<Item, ArrayImpl> as MatrixLuDecomposition>::get_u(lu, u_mat.r_mut());
+
+        let l = TriangularMatrix::<Item>::new(&l_mat.r(), TriangularType::Lower)?;
+        let u = TriangularMatrix::<Item>::new(&u_mat.r(), TriangularType::Upper)?;
+        let perm = <LuDecomposition<Item, ArrayImpl> as MatrixLuDecomposition>::get_perm(lu);
+
+        Ok(Self { l, u, perm })
+    }
+
+    /// Return the row permutation associated with the LU factorization.
+    pub fn perm(&self) -> &[usize] {
+        &self.perm
+    }
+
+    /// Multiply a vector by the factorized matrix.
+    pub fn mul_vec<
+        ArrayImplMut: RawAccessMut<Item = Item>
+            + UnsafeRandomAccessByValue<1, Item = Item>
+            + UnsafeRandomAccessMut<1, Item = Item>
+            + UnsafeRandomAccessByRef<1, Item = Item>
+            + Shape<1>
+            + Stride<1>,
+    >(
+        &self,
+        trans: TransMode,
+        rhs: Array<Item, ArrayImplMut, 1>,
+    ) -> RlstResult<()> {
+        self.mul_mat(
+            trans,
+            rhs.insert_empty_axis(crate::dense::array::empty_axis::AxisPosition::Back),
+        )
+    }
+
+    /// Multiply multiple right-hand sides by the factorized matrix.
+    pub fn mul_mat<
+        ArrayImplMut: RawAccessMut<Item = Item>
+            + UnsafeRandomAccessByValue<2, Item = Item>
+            + UnsafeRandomAccessMut<2, Item = Item>
+            + UnsafeRandomAccessByRef<2, Item = Item>
+            + Shape<2>
+            + Stride<2>,
+    >(
+        &self,
+        trans: TransMode,
+        mut rhs: Array<Item, ArrayImplMut, 2>,
+    ) -> RlstResult<()> {
+        let n = self.l.tri.shape()[0];
+        assert_eq!(rhs.shape()[0], n);
+        assert_lapack_stride(rhs.stride());
+
+        match trans {
+            TransMode::NoTrans => {
+                self.u.mul(&mut rhs, Side::Left, TransMode::NoTrans);
+                self.l.mul(&mut rhs, Side::Left, TransMode::NoTrans);
+                apply_row_permutation(&self.perm, rhs, false);
+            }
+            TransMode::Trans => {
+                apply_row_permutation(&self.perm, rhs.r_mut(), true);
+                self.l.mul(&mut rhs, Side::Left, TransMode::Trans);
+                self.u.mul(&mut rhs, Side::Left, TransMode::Trans);
+            }
+            TransMode::ConjTrans => {
+                apply_row_permutation(&self.perm, rhs.r_mut(), true);
+                self.l.mul(&mut rhs, Side::Left, TransMode::ConjTrans);
+                self.u.mul(&mut rhs, Side::Left, TransMode::ConjTrans);
+            }
+            _ => panic!("Transposition mode not supported for LU multiplication."),
+        }
+
+        Ok(())
+    }
+
+    /// Solve a linear system with a single right-hand side.
+    pub fn solve_vec<
+        ArrayImplMut: RawAccessMut<Item = Item>
+            + UnsafeRandomAccessByValue<1, Item = Item>
+            + UnsafeRandomAccessMut<1, Item = Item>
+            + UnsafeRandomAccessByRef<1, Item = Item>
+            + Shape<1>
+            + Stride<1>,
+    >(
+        &self,
+        trans: TransMode,
+        rhs: Array<Item, ArrayImplMut, 1>,
+    ) -> RlstResult<()> {
+        self.solve_mat(
+            trans,
+            rhs.insert_empty_axis(crate::dense::array::empty_axis::AxisPosition::Back),
+        )
+    }
+
+    /// Solve a linear system with multiple right-hand sides.
+    pub fn solve_mat<
+        ArrayImplMut: RawAccessMut<Item = Item>
+            + UnsafeRandomAccessByValue<2, Item = Item>
+            + UnsafeRandomAccessMut<2, Item = Item>
+            + UnsafeRandomAccessByRef<2, Item = Item>
+            + Shape<2>
+            + Stride<2>,
+    >(
+        &self,
+        trans: TransMode,
+        mut rhs: Array<Item, ArrayImplMut, 2>,
+    ) -> RlstResult<()> {
+        let n = self.l.tri.shape()[0];
+        assert_eq!(rhs.shape()[0], n);
+        assert_lapack_stride(rhs.stride());
+
+        match trans {
+            TransMode::NoTrans => {
+                apply_row_permutation(&self.perm, rhs.r_mut(), true);
+                self.l.solve(&mut rhs, Side::Left, TransMode::NoTrans);
+                self.u.solve(&mut rhs, Side::Left, TransMode::NoTrans);
+            }
+            TransMode::Trans => {
+                self.u.solve(&mut rhs, Side::Left, TransMode::Trans);
+                self.l.solve(&mut rhs, Side::Left, TransMode::Trans);
+                apply_row_permutation(&self.perm, rhs, false);
+            }
+            TransMode::ConjTrans => {
+                self.u.solve(&mut rhs, Side::Left, TransMode::ConjTrans);
+                self.l.solve(&mut rhs, Side::Left, TransMode::ConjTrans);
+                apply_row_permutation(&self.perm, rhs, false);
+            }
+            _ => panic!("Transposition mode not supported for LU solve."),
+        }
+
+        Ok(())
+    }
+}
+
+impl<
+        Item: RlstScalar,
+        ArrayImpl: UnsafeRandomAccessByValue<2, Item = Item>
+            + Stride<2>
+            + Shape<2>
+            + RawAccessMut<Item = Item>,
+    > LuDecomposition<Item, ArrayImpl>
+where
+    LuDecomposition<Item, ArrayImpl>: MatrixLuDecomposition<Item = Item, ArrayImpl = ArrayImpl>,
+    TriangularMatrix<Item>: TriangularOperations<Item = Item>,
+{
+    /// Create a reusable square-LU object for repeated solves and multiplications.
+    pub fn to_square_factors(&self) -> RlstResult<SquareLuFactors<Item>> {
+        SquareLuFactors::from_lu(self)
+    }
+}
+
+fn apply_row_permutation<
+    Item: RlstScalar,
+    ArrayImpl: UnsafeRandomAccessByValue<2, Item = Item>
+        + UnsafeRandomAccessMut<2, Item = Item>
+        + UnsafeRandomAccessByRef<2, Item = Item>
+        + Shape<2>,
+>(
+    perm: &[usize],
+    mut arr: Array<Item, ArrayImpl, 2>,
+    transpose: bool,
+) {
+    let shape = arr.shape();
+    let mut tmp = crate::rlst_dynamic_array2!(Item, shape);
+
+    if transpose {
+        for row in 0..shape[0] {
+            for col in 0..shape[1] {
+                tmp[[row, col]] = arr[[perm[row], col]];
+            }
+        }
+    } else {
+        for row in 0..shape[0] {
+            for col in 0..shape[1] {
+                tmp[[perm[row], col]] = arr[[row, col]];
+            }
+        }
+    }
+
+    for row in 0..shape[0] {
+        for col in 0..shape[1] {
+            arr[[row, col]] = tmp[[row, col]];
+        }
+    }
+}
+
 macro_rules! impl_lu {
     ($scalar:ty, $getrf:expr, $getrs:expr) => {
         impl<
@@ -319,6 +568,39 @@ macro_rules! impl_lu {
                     0 => Ok(()),
                     _ => Err(RlstError::LapackError(info)),
                 }
+            }
+
+            fn mul_vec<
+                ArrayImplMut: RawAccessMut<Item = $scalar>
+                    + UnsafeRandomAccessByValue<1, Item = $scalar>
+                    + UnsafeRandomAccessMut<1, Item = $scalar>
+                    + UnsafeRandomAccessByRef<1, Item = $scalar>
+                    + Shape<1>
+                    + Stride<1>,
+            >(
+                &self,
+                trans: TransMode,
+                rhs: Array<$scalar, ArrayImplMut, 1>,
+            ) -> RlstResult<()> {
+                self.mul_mat(
+                    trans,
+                    rhs.insert_empty_axis(crate::dense::array::empty_axis::AxisPosition::Back),
+                )
+            }
+
+            fn mul_mat<
+                ArrayImplMut: RawAccessMut<Item = $scalar>
+                    + UnsafeRandomAccessByValue<2, Item = $scalar>
+                    + UnsafeRandomAccessMut<2, Item = $scalar>
+                    + UnsafeRandomAccessByRef<2, Item = $scalar>
+                    + Shape<2>
+                    + Stride<2>,
+            >(
+                &self,
+                trans: TransMode,
+                rhs: Array<$scalar, ArrayImplMut, 2>,
+            ) -> RlstResult<()> {
+                self.to_square_factors()?.mul_mat(trans, rhs)
             }
 
             fn get_l_resize<

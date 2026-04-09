@@ -67,7 +67,7 @@ pub use crate::dense::linalg::givens_rotation::{
 };
 pub use crate::dense::linalg::interpolative_decomposition::{IdDecomposition, MatrixId};
 pub use crate::dense::linalg::inverse::MatrixInverse;
-pub use crate::dense::linalg::lu::{LuDecomposition, MatrixLuDecomposition};
+pub use crate::dense::linalg::lu::{LuDecomposition, MatrixLuDecomposition, SquareLuFactors};
 pub use crate::dense::linalg::null_space::{MatrixNull, NullSpace};
 pub use crate::dense::linalg::pseudo_inverse::MatrixPseudoInverse;
 pub use crate::dense::linalg::qr::{

@@ -17,6 +17,7 @@ use std::cmp::min;
 use std::rc::Rc;
 
 /// Identity operator used as the default GMRES preconditioner.
+/// Identity operator used as the default GMRES preconditioner.
 pub struct IdOperator<Space: IndexableSpace> {
     domain: Rc<Space>,
     range: Rc<Space>,
@@ -349,7 +350,7 @@ where
 
             y_aux[..(inner + 1)].copy_from_slice(&y[..(inner + 1)]);
 
-            let h_t = TriangularMatrix::new(
+            let h_t = <TriangularMatrix<Field<Space::F>> as TriangularOperations>::new(
                 &h.r().into_subview([0, 0], [inner + 1, inner + 1]),
                 TriangularType::Lower,
             )
