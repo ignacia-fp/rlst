@@ -8,7 +8,7 @@ use crate::operator::{
 use crate::ElementContainerMut;
 use crate::IndexableSpace;
 use crate::{
-    rlst_dynamic_array2, DefaultIteratorMut, Element, ElementContainer, GivensRotations,
+    rlst_dynamic_array2, DefaultIteratorMut, Element, ElementContainer, GivensRotationData,
     GivensRotationsOps, LinearSpace, OperatorBase, RawAccess, TransMode, TriangularMatrix,
     TriangularOperations, TriangularType, VectorFrame,
 };
@@ -16,7 +16,6 @@ use core::f64;
 use std::cmp::min;
 use std::rc::Rc;
 
-/// Identity operator used as the default GMRES preconditioner.
 /// Identity operator used as the default GMRES preconditioner.
 pub struct IdOperator<Space: IndexableSpace> {
     domain: Rc<Space>,
@@ -101,7 +100,7 @@ pub struct GmresIteration<
     max_iter: usize,
     restart: usize,
     dim: usize,
-    tol: f64, //<Space::F as RlstScalar>::Real,
+    tol: <Space::F as RlstScalar>::Real,
     #[allow(clippy::type_complexity)]
     callable: Option<
         Box<
@@ -125,7 +124,8 @@ where
     Space: LinearSpace,
     TriangularMatrix<<Space as LinearSpace>::F>:
         TriangularOperations<Item = <Space as LinearSpace>::F>,
-    GivensRotations<<Space as LinearSpace>::F>: GivensRotationsOps<<Space as LinearSpace>::F>,
+    Vec<GivensRotationData<<Space as LinearSpace>::F>>:
+        GivensRotationsOps<<Space as LinearSpace>::F>,
 {
     /// Create a new GMRES iteration
     pub fn new(op: Operator<OpImpl>, rhs: Element<Container>, dim: usize) -> Self {
@@ -138,7 +138,7 @@ where
             max_iter: 10 * dim,
             restart: min(dim, 20),
             dim,
-            tol: 1E-6, //num::cast::<f64, <Space::F as RlstScalar>::Real>(1E-6).unwrap(),
+            tol: num::cast::<f64, <Space::F as RlstScalar>::Real>(1E-6).unwrap(),
             callable: None,
             print_debug: false,
         }
@@ -154,7 +154,7 @@ where
     }
 
     /// Set the tolerance
-    pub fn set_tol(mut self, tol: f64) -> Self {
+    pub fn set_tol(mut self, tol: <Space::F as RlstScalar>::Real) -> Self {
         self.tol = tol;
         self
     }
@@ -218,7 +218,7 @@ where
         let max_inner = self.restart;
 
         let rhs_norm = self.rhs.norm();
-        let atol = num::cast::<f64, <Space::F as RlstScalar>::Real>(self.tol).unwrap() * rhs_norm;
+        let atol = self.tol * rhs_norm;
 
         let eps = num::cast::<f64, <Space::F as RlstScalar>::Real>(2.220446049250313e-16).unwrap(); //TODO: find a way to extract machine precision
 
@@ -245,7 +245,7 @@ where
 
         for iteration in 0..self.max_iter {
             let mut givens_rotations =
-                <GivensRotations<Space::F> as GivensRotationsOps<Space::F>>::new();
+                <Vec<GivensRotationData<Space::F>> as GivensRotationsOps<Space::F>>::new();
             let mut v = VectorFrame::default();
             if iteration == 0 {
                 res = res.r() - self.operator.apply(self.x.r(), crate::TransMode::NoTrans);
