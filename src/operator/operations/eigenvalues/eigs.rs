@@ -1,5 +1,5 @@
 //! Eigenvalues
-use crate::dense::linalg::naupd::NonSymmetricArnoldiUpdate;
+use crate::dense::linalg::naupd::{ArnoldiBackend, NonSymmetricArnoldiUpdate};
 use crate::dense::linalg::neupd::NonSymmetricArnoldiExtract;
 use crate::dense::types::RlstScalar;
 use crate::operator::operations::eigenvalues::split::xslice_yslice;
@@ -124,6 +124,18 @@ where
         sigma: Option<Space::F>,
         rev: bool,
     ) -> (Vec<<Space::F as RlstScalar>::Complex>, Vec<Space::F>) {
+        self.run_with_backend(v0, k, sigma, rev, ArnoldiBackend::Auto)
+    }
+
+    /// Run eigs with an explicit backend choice.
+    pub fn run_with_backend(
+        &mut self,
+        v0: Option<&[Space::F]>,
+        k: i32,
+        sigma: Option<Space::F>,
+        rev: bool,
+        backend: ArnoldiBackend,
+    ) -> (Vec<<Space::F as RlstScalar>::Complex>, Vec<Space::F>) {
         let dim = self.operator.domain().dimension() as i32;
 
         assert!(k <= dim - 2, "k must be at most N-2");
@@ -150,7 +162,8 @@ where
         let mut ipntr: [i32; 14] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
 
         loop {
-            <Space::F as NonSymmetricArnoldiUpdate>::naupd(
+            <Space::F as NonSymmetricArnoldiUpdate>::naupd_with_backend(
+                backend,
                 &mut ido,
                 &mut self.bmat,
                 dim,
@@ -221,7 +234,8 @@ where
             Some(val) => (val.re(), val.im()),
         };
 
-        <Space::F as NonSymmetricArnoldiExtract>::neupd(
+        <Space::F as NonSymmetricArnoldiExtract>::neupd_with_backend(
+            backend,
             rev as i32,
             &self.howmny,
             &mut select,
@@ -253,6 +267,6 @@ where
             panic!("ARPACKERROR");
         }
 
-        return (vals, vecs);
+        (vals, vecs)
     }
 }

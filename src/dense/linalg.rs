@@ -10,6 +10,8 @@ pub mod givens_rotation;
 pub mod interpolative_decomposition;
 pub mod inverse;
 pub mod lu;
+/// Native Arnoldi helpers used on platforms where ARPACK is unavailable.
+pub mod native_arpack;
 pub mod naupd;
 pub mod neupd;
 pub mod null_space;

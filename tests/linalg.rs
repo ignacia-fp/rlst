@@ -5,7 +5,9 @@ use rlst::assert_array_abs_diff_eq;
 use rlst::assert_array_relative_eq;
 use rlst::dense::linalg::interpolative_decomposition::{Accuracy, MatrixIdDecomposition};
 use rlst::dense::linalg::qr::Pivoting;
+use rlst::operator::operations::eigenvalues::eigs::Which;
 use rlst::prelude::*;
+use rlst::{c64, Eigs, Operator};
 
 macro_rules! impl_inverse_tests {
     ($scalar:ty, $tol:expr) => {
@@ -579,3 +581,52 @@ impl_tests!(f32, 1E-4);
 impl_tests!(f64, 1E-11);
 impl_tests!(c32, 1E-4);
 impl_tests!(c64, 1E-10);
+
+#[test]
+fn test_eigs_diagonal_f64() {
+    let mut mat = rlst_dynamic_array2!(f64, [4, 4]);
+    mat[[0, 0]] = 1.0;
+    mat[[1, 1]] = 5.0;
+    mat[[2, 2]] = 3.0;
+    mat[[3, 3]] = 2.0;
+
+    let op = Operator::from(mat);
+    let mut eigs = Eigs::new(op, 1e-10, Some(40), None, Some(Which::LM));
+    let (vals, vecs) = eigs.run(None, 1, None, true);
+
+    approx::assert_relative_eq!(vals[0].re, 5.0, epsilon = 1e-8);
+    approx::assert_relative_eq!(vals[0].im, 0.0, epsilon = 1e-8);
+
+    let eigenvector = &vecs[..4];
+    let eigenvalue = vals[0].re;
+    let residual = [
+        (1.0 - eigenvalue) * eigenvector[0],
+        (5.0 - eigenvalue) * eigenvector[1],
+        (3.0 - eigenvalue) * eigenvector[2],
+        (2.0 - eigenvalue) * eigenvector[3],
+    ];
+    let residual_norm = residual
+        .into_iter()
+        .map(|value| value * value)
+        .sum::<f64>()
+        .sqrt();
+    assert!(
+        residual_norm < 1e-6,
+        "unexpected residual norm: {residual_norm}"
+    );
+}
+
+#[test]
+fn test_eigs_diagonal_c64() {
+    let mut mat = rlst_dynamic_array2!(c64, [3, 3]);
+    mat[[0, 0]] = c64::new(1.0, 0.0);
+    mat[[1, 1]] = c64::new(1.0, 4.0);
+    mat[[2, 2]] = c64::new(-2.0, 1.0);
+
+    let op = Operator::from(mat);
+    let mut eigs = Eigs::new(op, 1e-10, Some(40), None, Some(Which::LM));
+    let (vals, _) = eigs.run(None, 1, None, false);
+
+    approx::assert_relative_eq!(vals[0].re, 1.0, epsilon = 1e-8);
+    approx::assert_relative_eq!(vals[0].im, 4.0, epsilon = 1e-8);
+}
