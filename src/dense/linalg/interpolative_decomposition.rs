@@ -192,6 +192,8 @@ pub enum Accuracy<T> {
     FixedRank(usize),
     /// Computes the rank from the tolerance, and if this one is smaller than a user set range, then we stick to the user set range
     MaxRank(T, usize),
+    /// Computes the rank from the tolerance, and if this one is larger than a user set range, then we stick to the user set range
+    MinRank(T, usize),
 }
 
 fn id_matrix_shape(shape: [usize; 2], trans_mode: TransMode) -> [usize; 2] {
@@ -290,6 +292,14 @@ macro_rules! impl_id {
                             let rank = std::cmp::max(k, rrqr.rank);
                             (rrqr.r, rrqr.perm, rank)
                         }
+                        Accuracy::MinRank(tol, k) => {
+                            let rrqr = arr_work.r_mut().into_rrqr_alloc(
+                                RankRevealingQrType::RRQR,
+                                RankParam::Tol(tol, QrTolerance::Rel),
+                            );
+                            let rank = std::cmp::min(k, rrqr.rank);
+                            (rrqr.r, rrqr.perm, rank)
+                        }
                     },
                     RankRevealingQrType::SRRQR(f) => match rank_param {
                         Accuracy::Tol(tol) => {
@@ -305,7 +315,22 @@ macro_rules! impl_id {
                                 .into_rrqr_alloc(RankRevealingQrType::SRRQR(f), RankParam::Rank(k));
                             (rrqr.r, rrqr.perm, rrqr.rank)
                         }
-                        Accuracy::MaxRank(_tol, _k) => panic!("Max Rank nor implemented for SRRQR"),
+                        Accuracy::MaxRank(tol, k) => {
+                            let rrqr = arr_work.r_mut().into_rrqr_alloc(
+                                RankRevealingQrType::SRRQR(f),
+                                RankParam::Tol(tol, QrTolerance::Rel),
+                            );
+                            let rank = std::cmp::max(k, rrqr.rank);
+                            (rrqr.r, rrqr.perm, rank)
+                        }
+                        Accuracy::MinRank(tol, k) => {
+                            let rrqr = arr_work.r_mut().into_rrqr_alloc(
+                                RankRevealingQrType::SRRQR(f),
+                                RankParam::Tol(tol, QrTolerance::Rel),
+                            );
+                            let rank = std::cmp::min(k, rrqr.rank);
+                            (rrqr.r, rrqr.perm, rank)
+                        }
                     },
                 };
 
@@ -408,3 +433,45 @@ impl_id!(f64);
 impl_id!(f32);
 impl_id!(c32);
 impl_id!(c64);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn rank_two_test_matrix() -> DynamicArray<f64, 2> {
+        let mut arr = rlst_dynamic_array2!(f64, [2, 4]);
+        arr.r_mut()[[0, 0]] = 1.0;
+        arr.r_mut()[[0, 2]] = 1.0;
+        arr.r_mut()[[1, 1]] = 1.0;
+        arr.r_mut()[[1, 3]] = 1.0;
+        arr
+    }
+
+    #[test]
+    fn min_rank_caps_rrqr_rank() {
+        let mut arr = rank_two_test_matrix();
+        let id = arr
+            .r_mut()
+            .into_id_alloc(
+                Accuracy::MinRank(1e-12, 1),
+                RankRevealingQrType::RRQR,
+                TransMode::NoTrans,
+            )
+            .unwrap();
+        assert_eq!(id.rank, 1);
+    }
+
+    #[test]
+    fn min_rank_caps_srrqr_rank() {
+        let mut arr = rank_two_test_matrix();
+        let id = arr
+            .r_mut()
+            .into_id_alloc(
+                Accuracy::MinRank(1e-12, 1),
+                RankRevealingQrType::SRRQR(2.0),
+                TransMode::NoTrans,
+            )
+            .unwrap();
+        assert_eq!(id.rank, 1);
+    }
+}
