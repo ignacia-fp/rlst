@@ -32,6 +32,7 @@ pub mod orglq;
 pub mod orgqr;
 pub mod posv;
 pub mod potrf;
+pub mod potrs;
 pub mod sygv;
 pub mod sytrf;
 pub mod sytrs;

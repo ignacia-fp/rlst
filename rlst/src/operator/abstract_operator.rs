@@ -3,7 +3,10 @@
 use num::{One, Zero};
 
 use crate::base_types::{c32, c64};
-use crate::{LinearSpace, abstract_operator::OperatorBase};
+use crate::{
+    LinearSpace,
+    abstract_operator::{OperatorBase, TransposeOperatorBase},
+};
 
 /// Owning wrapper that gives an [`OperatorBase`] implementation operator algebra.
 ///
@@ -63,6 +66,22 @@ impl<OpImpl: OperatorBase> OperatorBase for Operator<OpImpl> {
     }
 }
 
+impl<OpImpl> TransposeOperatorBase for Operator<OpImpl>
+where
+    OpImpl: TransposeOperatorBase,
+    OpImpl::Domain: LinearSpace<F = <OpImpl::Range as LinearSpace>::F>,
+{
+    fn apply_transpose(
+        &self,
+        alpha: <Self::Range as LinearSpace>::F,
+        x: &super::element::Element<Self::Range>,
+        beta: <Self::Range as LinearSpace>::F,
+        y: &mut super::element::Element<Self::Domain>,
+    ) {
+        self.0.apply_transpose(alpha, x, beta, y)
+    }
+}
+
 impl<OpImpl: OperatorBase> OperatorBase for RlstOperatorReference<'_, OpImpl> {
     type Domain = OpImpl::Domain;
 
@@ -85,6 +104,22 @@ impl<OpImpl: OperatorBase> OperatorBase for RlstOperatorReference<'_, OpImpl> {
         y: &mut super::element::Element<Self::Range>,
     ) {
         self.0.apply(alpha, x, beta, y)
+    }
+}
+
+impl<OpImpl> TransposeOperatorBase for RlstOperatorReference<'_, OpImpl>
+where
+    OpImpl: TransposeOperatorBase,
+    OpImpl::Domain: LinearSpace<F = <OpImpl::Range as LinearSpace>::F>,
+{
+    fn apply_transpose(
+        &self,
+        alpha: <Self::Range as LinearSpace>::F,
+        x: &super::element::Element<Self::Range>,
+        beta: <Self::Range as LinearSpace>::F,
+        y: &mut super::element::Element<Self::Domain>,
+    ) {
+        self.0.apply_transpose(alpha, x, beta, y)
     }
 }
 
@@ -343,3 +378,108 @@ impl_scalar_mult!(u8);
 impl_scalar_mult!(u16);
 impl_scalar_mult!(u32);
 impl_scalar_mult!(u64);
+
+impl<Domain, Range, OpImpl1, OpImpl2> TransposeOperatorBase for OperatorSum<OpImpl1, OpImpl2>
+where
+    Domain: LinearSpace<F = Range::F>,
+    Range: LinearSpace,
+    Range::F: One + Copy,
+    OpImpl1: TransposeOperatorBase<Domain = Domain, Range = Range>,
+    OpImpl2: TransposeOperatorBase<Domain = Domain, Range = Range>,
+{
+    fn apply_transpose(
+        &self,
+        alpha: Range::F,
+        x: &super::element::Element<Range>,
+        beta: Range::F,
+        y: &mut super::element::Element<Domain>,
+    ) {
+        self.0.apply_transpose(alpha, x, beta, y);
+        self.1.apply_transpose(alpha, x, One::one(), y);
+    }
+}
+
+impl<Domain, Range, OpImpl1, OpImpl2> TransposeOperatorBase for OperatorSub<OpImpl1, OpImpl2>
+where
+    Domain: LinearSpace<F = Range::F>,
+    Range: LinearSpace,
+    Range::F: One + Copy + std::ops::Neg<Output = Range::F>,
+    OpImpl1: TransposeOperatorBase<Domain = Domain, Range = Range>,
+    OpImpl2: TransposeOperatorBase<Domain = Domain, Range = Range>,
+{
+    fn apply_transpose(
+        &self,
+        alpha: Range::F,
+        x: &super::element::Element<Range>,
+        beta: Range::F,
+        y: &mut super::element::Element<Domain>,
+    ) {
+        self.0.apply_transpose(alpha, x, beta, y);
+        self.1
+            .apply_transpose(std::ops::Neg::neg(alpha), x, One::one(), y);
+    }
+}
+
+impl<Intermediate, OpImpl1, OpImpl2> TransposeOperatorBase
+    for OperatorProduct<Operator<OpImpl1>, Operator<OpImpl2>>
+where
+    Intermediate: LinearSpace,
+    Intermediate::F: One + Zero,
+    OpImpl1: TransposeOperatorBase<Domain = Intermediate>,
+    OpImpl2: TransposeOperatorBase<Range = Intermediate>,
+    OpImpl2::Domain: LinearSpace<F = Intermediate::F>,
+    OpImpl1::Range: LinearSpace<F = Intermediate::F>,
+{
+    #[inline(always)]
+    fn apply_transpose(
+        &self,
+        alpha: Intermediate::F,
+        x: &super::element::Element<Self::Range>,
+        beta: Intermediate::F,
+        y: &mut super::element::Element<Self::Domain>,
+    ) {
+        // (A B)^T = B^T A^T. Keep the intermediate in its native vector
+        // space instead of materializing either operator as a matrix.
+        let mut tmp = self.0.domain().zero();
+        self.0
+            .apply_transpose(One::one(), x, Zero::zero(), &mut tmp);
+        self.1.apply_transpose(alpha, &tmp, beta, y);
+    }
+}
+
+impl<Domain, Range, Scalar, OpImpl> TransposeOperatorBase for OperatorScalarMul<Scalar, OpImpl>
+where
+    Domain: LinearSpace<F = Scalar>,
+    Range: LinearSpace<F = Scalar>,
+    Scalar: std::ops::Mul<Output = Scalar> + Copy,
+    OpImpl: TransposeOperatorBase<Domain = Domain, Range = Range>,
+{
+    fn apply_transpose(
+        &self,
+        alpha: Scalar,
+        x: &super::element::Element<Range>,
+        beta: Scalar,
+        y: &mut super::element::Element<Domain>,
+    ) {
+        self.1.apply_transpose(self.0 * alpha, x, beta, y)
+    }
+}
+
+impl<Domain, Range, OpImpl> TransposeOperatorBase for OperatorNegation<OpImpl>
+where
+    Domain: LinearSpace<F = Range::F>,
+    Range: LinearSpace,
+    Range::F: std::ops::Neg<Output = Range::F>,
+    OpImpl: TransposeOperatorBase<Domain = Domain, Range = Range>,
+{
+    fn apply_transpose(
+        &self,
+        alpha: Range::F,
+        x: &super::element::Element<Range>,
+        beta: Range::F,
+        y: &mut super::element::Element<Domain>,
+    ) {
+        self.0
+            .apply_transpose(std::ops::Neg::neg(alpha), x, beta, y)
+    }
+}

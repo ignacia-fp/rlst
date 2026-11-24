@@ -2,10 +2,10 @@
 
 use crate::{
     UnsafeRandom1DAccessByValue,
-    base_types::{RlstError, RlstResult, UpLo},
+    base_types::{RlstResult, UpLo},
     dense::{
         array::{Array, DynArray},
-        linalg::lapack::interface::{posv::PosvUplo, potrf::PotrfUplo},
+        linalg::lapack::interface::{potrf::PotrfUplo, potrs::PotrsUplo},
     },
     traits::{
         base_operations::Shape,
@@ -16,6 +16,103 @@ use crate::{
     },
 };
 
+/// Reusable Cholesky factors of a Hermitian positive-definite matrix.
+pub struct CholeskyDecomposition<Item: Lapack> {
+    factor: DynArray<Item, 2>,
+    uplo: UpLo,
+}
+
+impl<Item: Lapack> CholeskyDecomposition<Item> {
+    /// Return the triangular factor.
+    pub fn factor(&self) -> &DynArray<Item, 2> {
+        &self.factor
+    }
+
+    /// Consume the decomposition and return its triangular factor.
+    pub fn into_factor(self) -> DynArray<Item, 2> {
+        self.factor
+    }
+
+    /// Overwrite one or more right-hand sides with the solution.
+    pub fn solve_in_place<const NDIM: usize>(
+        &self,
+        rhs: &mut DynArray<Item, NDIM>,
+    ) -> RlstResult<()> {
+        assert!(
+            NDIM == 1 || NDIM == 2,
+            "RHS must be one- or two-dimensional"
+        );
+        let n = self.factor.shape()[0];
+        assert_eq!(rhs.shape()[0], n, "RHS row count must match the factor");
+        let nrhs = if NDIM == 1 { 1 } else { rhs.shape()[1] };
+        let uplo = match self.uplo {
+            UpLo::Upper => PotrsUplo::Upper,
+            UpLo::Lower => PotrsUplo::Lower,
+        };
+        Item::potrs(
+            uplo,
+            n,
+            nrhs,
+            self.factor.data().unwrap(),
+            n,
+            rhs.data_mut().unwrap(),
+            n,
+        )?;
+        Ok(())
+    }
+
+    /// Copy `rhs`, solve the system, and return the solution.
+    pub fn solve<ArrayImpl, const NDIM: usize>(
+        &self,
+        rhs: &Array<ArrayImpl, NDIM>,
+    ) -> RlstResult<DynArray<Item, NDIM>>
+    where
+        ArrayImpl: UnsafeRandom1DAccessByValue<Item = Item> + Shape<NDIM>,
+    {
+        let mut solution = DynArray::new_from(rhs);
+        self.solve_in_place(&mut solution)?;
+        Ok(solution)
+    }
+}
+
+impl<Item, ArrayImpl> Array<ArrayImpl, 2>
+where
+    ArrayImpl: UnsafeRandom1DAccessByValue<Item = Item> + Shape<2>,
+    Item: Lapack,
+{
+    /// Compute reusable Cholesky factors.
+    pub fn cholesky_decomposition(&self, uplo: UpLo) -> RlstResult<CholeskyDecomposition<Item>> {
+        let [m, n] = self.shape();
+        assert_eq!(m, n, "Cholesky decomposition requires a square matrix");
+        let mut factor = DynArray::new_from(self);
+        let potrf_uplo = match uplo {
+            UpLo::Upper => PotrfUplo::Upper,
+            UpLo::Lower => PotrfUplo::Lower,
+        };
+        Item::potrf(potrf_uplo, m, factor.data_mut().unwrap(), m)?;
+
+        // Keep the returned object a genuine triangular matrix, rather than
+        // exposing LAPACK's unused triangle containing stale input values.
+        match uplo {
+            UpLo::Upper => {
+                for column in 0..n {
+                    for row in column + 1..m {
+                        factor[[row, column]] = Item::zero();
+                    }
+                }
+            }
+            UpLo::Lower => {
+                for column in 0..n {
+                    for row in 0..column {
+                        factor[[row, column]] = Item::zero();
+                    }
+                }
+            }
+        }
+        Ok(CholeskyDecomposition { factor, uplo })
+    }
+}
+
 impl<Item, ArrayImpl> Cholesky for Array<ArrayImpl, 2>
 where
     ArrayImpl: UnsafeRandom1DAccessByValue<Item = Item> + Shape<2>,
@@ -24,39 +121,7 @@ where
     type Item = Item;
 
     fn cholesky(&self, uplo: UpLo) -> RlstResult<DynArray<Self::Item, 2>> {
-        let [m, n] = self.shape();
-
-        assert_eq!(
-            m, n,
-            "Cholesky decomposition requires a square matrix, but got shape: {m}x{n}"
-        );
-
-        let mut a = DynArray::new_from(self);
-
-        let uplo = match uplo {
-            UpLo::Upper => PotrfUplo::Upper,
-            UpLo::Lower => PotrfUplo::Lower,
-        };
-
-        Item::potrf(uplo, m, a.data_mut().unwrap(), m)?;
-
-        // We manually set the lower or upper part of the matrix to zero.
-
-        if uplo == PotrfUplo::Upper {
-            for col in 0..n {
-                for row in (col + 1)..m {
-                    unsafe { *a.get_unchecked_mut([row, col]) = Item::zero() };
-                }
-            }
-        } else {
-            for col in 0..n {
-                for row in 0..col {
-                    unsafe { *a.get_unchecked_mut([row, col]) = Item::zero() };
-                }
-            }
-        }
-
-        Ok(a)
+        Ok(self.cholesky_decomposition(uplo)?.into_factor())
     }
 }
 
@@ -74,51 +139,7 @@ where
         uplo: UpLo,
         rhs: &Array<RhsArrayImpl, NDIM>,
     ) -> RlstResult<Self::Output> {
-        if NDIM > 2 {
-            return Err(RlstError::GeneralError(
-                "The right-hand side cannot have more than two dimensions.".to_string(),
-            ));
-        }
-
-        let [m, n] = self.shape();
-
-        assert_eq!(
-            m, n,
-            "Cholesky solve requires a square matrix, but got shape: {m}x{n}"
-        );
-
-        assert_eq!(
-            m,
-            rhs.shape()[0],
-            "Left-hand side and right-hand side must have the same number of rows. {} != {}",
-            m,
-            rhs.shape()[0]
-        );
-
-        let mut a = DynArray::new_from(self);
-
-        let nrhs = if NDIM == 1 { 1 } else { rhs.shape()[1] };
-
-        let mut b = DynArray::new_from(rhs);
-
-        let ldb = b.shape()[0];
-
-        let uplo = match uplo {
-            UpLo::Upper => PosvUplo::Upper,
-            UpLo::Lower => PosvUplo::Lower,
-        };
-
-        Item::posv(
-            uplo,
-            m,
-            nrhs,
-            a.data_mut().unwrap(),
-            m,
-            b.data_mut().unwrap(),
-            ldb,
-        )?;
-
-        Ok(b)
+        self.cholesky_decomposition(uplo)?.solve(rhs)
     }
 }
 
@@ -161,6 +182,15 @@ mod test {
                 let x_actual = a.cholesky_solve(UpLo::Upper, &b).unwrap();
 
                 crate::assert_array_abs_diff_eq!(x_actual, x_expected, $tol);
+
+                let factors = a.cholesky_decomposition(UpLo::Upper).unwrap();
+                let mut x_reused = DynArray::new_from(&b);
+                factors.solve_in_place(&mut x_reused).unwrap();
+                crate::assert_array_abs_diff_eq!(x_reused, x_expected, $tol);
+
+                // Reusing the same factors must not mutate them.
+                let x_reused_again = factors.solve(&b).unwrap();
+                crate::assert_array_abs_diff_eq!(x_reused_again, x_expected, $tol);
             }
 
                     }

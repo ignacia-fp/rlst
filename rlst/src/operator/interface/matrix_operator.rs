@@ -7,8 +7,11 @@
 use mpi::traits::{Communicator, Equivalence};
 
 use crate::{
-    Array, AsMatrixApply, BaseItem, LinearSpace, Shape, abstract_operator::OperatorBase,
-    dense::array::DynArray, operator::abstract_operator::Operator, sparse::csr_mat::CsrMatrix,
+    Array, AsMatrixApply, BaseItem, LinearSpace, MultInto, RawAccess, Shape, Stride, TransMode,
+    abstract_operator::{OperatorBase, TransposeOperatorBase},
+    dense::array::DynArray,
+    operator::abstract_operator::Operator,
+    sparse::csr_mat::CsrMatrix,
 };
 
 #[cfg(feature = "mpi")]
@@ -91,6 +94,31 @@ where
     }
 }
 
+impl<'a, ArrayImpl> TransposeOperatorBase for ArrayOperator<'a, ArrayImpl>
+where
+    ArrayImpl: BaseItem + RawAccess + Stride<2> + Shape<2>,
+    ArrayImpl::Item: crate::Gemm,
+    ArrayVectorSpace<ArrayImpl::Item>:
+        LinearSpace<F = ArrayImpl::Item, Impl = DynArray<ArrayImpl::Item, 1>>,
+{
+    fn apply_transpose(
+        &self,
+        alpha: ArrayImpl::Item,
+        x: &crate::operator::element::Element<Self::Range>,
+        beta: ArrayImpl::Item,
+        y: &mut crate::operator::element::Element<Self::Domain>,
+    ) {
+        y.imp_mut().r_mut().mult_into(
+            TransMode::Trans,
+            TransMode::NoTrans,
+            alpha,
+            self.op.r(),
+            x.imp().r(),
+            beta,
+        );
+    }
+}
+
 /// Borrowed CSR matrix viewed as an abstract operator.
 ///
 /// For an `m x n` matrix, the domain contains length-n vectors and the range
@@ -148,6 +176,32 @@ where
         y: &mut crate::operator::element::Element<Self::Range>,
     ) {
         self.arr.apply(alpha, x.imp(), beta, y.imp_mut());
+    }
+}
+
+impl<'a, Item> TransposeOperatorBase for CsrOperator<'a, Item>
+where
+    Item: crate::RlstScalar + Default + std::ops::Mul<Output = Item> + std::ops::AddAssign<Item>,
+    ArrayVectorSpace<Item>: LinearSpace<F = Item, Impl = DynArray<Item, 1>>,
+    CsrMatrix<Item>: AsMatrixApply<DynArray<Item, 1>, DynArray<Item, 1>> + BaseItem<Item = Item>,
+{
+    fn apply_transpose(
+        &self,
+        alpha: Item,
+        x: &crate::operator::element::Element<Self::Range>,
+        beta: Item,
+        y: &mut crate::operator::element::Element<Self::Domain>,
+    ) {
+        self.arr.matmul_transpose(
+            alpha,
+            x.imp()
+                .data()
+                .expect("CSR transpose input must be contiguous"),
+            beta,
+            y.imp_mut()
+                .data_mut()
+                .expect("CSR transpose output must be contiguous"),
+        );
     }
 }
 
@@ -219,5 +273,32 @@ where
         y: &mut crate::operator::element::Element<Self::Range>,
     ) {
         self.op.apply(alpha, x.imp(), beta, y.imp_mut());
+    }
+}
+
+#[cfg(test)]
+mod transpose_tests {
+    use crate::{
+        LinearSpace,
+        abstract_operator::{OperatorBase, TransposeOperatorBase},
+        dense::array::DynArray,
+        operator::abstract_operator::Operator,
+    };
+
+    #[test]
+    fn dense_operator_applies_algebraic_transpose() {
+        let mut matrix = DynArray::<f64, 2>::from_shape([2, 3]);
+        for (entry, value) in matrix.iter_mut().zip([1.0, 4.0, 2.0, 5.0, 3.0, 6.0]) {
+            *entry = value;
+        }
+        let operator = Operator::from(&matrix);
+        let mut input = operator.range().zero();
+        for (entry, value) in input.imp_mut().iter_mut().zip([7.0, 8.0]) {
+            *entry = value;
+        }
+        let output = operator.dot_transpose(&input);
+        for (actual, expected) in output.imp().iter_ref().zip([39.0, 54.0, 69.0]) {
+            assert!((actual - expected).abs() < 1.0e-14);
+        }
     }
 }

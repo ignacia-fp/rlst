@@ -59,3 +59,31 @@ pub trait OperatorBase {
         res
     }
 }
+
+/// Extension trait for an algebraic transpose action `A^T`.
+///
+/// This is deliberately distinct from the conjugate transpose `A^*`, which
+/// is essential for nonsymmetric randomized algorithms over complex scalars.
+pub trait TransposeOperatorBase: OperatorBase
+where
+    Self::Domain: LinearSpace<F = <Self::Range as LinearSpace>::F>,
+{
+    /// Apply `A^T` in place as `y <- alpha A^T x + beta y`.
+    fn apply_transpose(
+        &self,
+        alpha: <Self::Range as LinearSpace>::F,
+        x: &Element<Self::Range>,
+        beta: <Self::Range as LinearSpace>::F,
+        y: &mut Element<Self::Domain>,
+    );
+
+    /// Apply `A^T` and allocate the result.
+    fn dot_transpose(&self, x: &Element<Self::Range>) -> Element<'_, Self::Domain>
+    where
+        <Self::Range as LinearSpace>::F: One + Zero,
+    {
+        let mut result = self.domain().zero();
+        self.apply_transpose(One::one(), x, Zero::zero(), &mut result);
+        result
+    }
+}

@@ -1488,6 +1488,26 @@ where
             .for_each(|val| *val = <Item>::random_scalar(rng, &dist));
     }
 
+    /// Fill with real uniformly distributed values.
+    ///
+    /// For a complex array the imaginary component is zero. Randomized
+    /// algorithms can therefore select real probes without changing the
+    /// scalar type of the operator.
+    pub fn fill_from_equally_distributed_real<R: Rng>(&mut self, rng: &mut R) {
+        let dist = StandardUniform;
+        self.iter_mut()
+            .for_each(|value| *value = Item::from_real(dist.sample(rng)));
+    }
+
+    /// Fill with real standard-normal values.
+    ///
+    /// For a complex array the imaginary component is zero.
+    pub fn fill_from_normally_distributed_real<R: Rng>(&mut self, rng: &mut R) {
+        let dist = StandardNormal;
+        self.iter_mut()
+            .for_each(|value| *value = Item::from_real(dist.sample(rng)));
+    }
+
     /// Fill an array with equally distributed random numbers using a given `seed`.
     ///
     /// # Traits

@@ -5,7 +5,7 @@ use crate::{
         ev::Ev, gees::Gees, geev::Geev, gelqf::Gelqf, gels::Gels, geqp3::Geqp3, geqrf::Geqrf,
         gesdd::Gesdd, gesvd::Gesvd, getrf::Getrf, getri::Getri, getrs::Getrs, gges::Gges,
         ggev::Ggev, mlq::Mlq, mqr::Mqr, orglq::Orglq, orgqr::Orgqr, posv::Posv, potrf::Potrf,
-        sygv::Sygv, sytrf::Sytrf, sytrs::Sytrs, trsm::Trsm, trsyl::Trsyl,
+        potrs::Potrs, sygv::Sygv, sytrf::Sytrf, sytrs::Sytrs, trsm::Trsm, trsyl::Trsyl,
     },
     traits::rlst_num::RlstScalar,
 };
@@ -32,6 +32,7 @@ pub trait Lapack:
     + Orgqr
     + Potrf
     + Posv
+    + Potrs
     + Sygv
     + Sytrf
     + Sytrs
@@ -62,6 +63,7 @@ impl<T> Lapack for T where
         + Orgqr
         + Potrf
         + Posv
+        + Potrs
         + Sygv
         + Sytrf
         + Sytrs

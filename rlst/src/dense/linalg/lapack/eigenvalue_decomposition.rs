@@ -161,9 +161,17 @@ where
             n,
             w.data_mut().unwrap(),
             vl.as_mut().map(|v| v.data_mut().unwrap()),
-            n,
+            if matches!(jobvl, JobVl::Compute) {
+                n
+            } else {
+                1
+            },
             vr.as_mut().map(|v| v.data_mut().unwrap()),
-            n,
+            if matches!(jobvr, JobVr::Compute) {
+                n
+            } else {
+                1
+            },
         )?;
 
         Ok((w, vr, vl))
@@ -236,6 +244,25 @@ mod test {
                 let actual = dot_blas!(vr.r(), dot_blas!(diag, vr.r().inverse().unwrap()));
                 crate::assert_array_abs_diff_eq!(actual, a_complex, $tol);
 
+            }
+
+            #[test]
+            fn [<test_eigendecomposition_modes_$scalar>]() {
+                let n = 4;
+                let mut a = DynArray::<$scalar, 2>::from_shape([n, n]);
+                a.fill_from_seed_equally_distributed(17);
+
+                let (_, right, left) = a.eig(EigMode::EigenvaluesOnly).unwrap();
+                assert!(right.is_none());
+                assert!(left.is_none());
+
+                let (_, right, left) = a.eig(EigMode::RightEigenvectors).unwrap();
+                assert_eq!(right.unwrap().shape(), [n, n]);
+                assert!(left.is_none());
+
+                let (_, right, left) = a.eig(EigMode::LeftEigenvectors).unwrap();
+                assert!(right.is_none());
+                assert_eq!(left.unwrap().shape(), [n, n]);
             }
             }
         };

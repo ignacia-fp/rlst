@@ -235,6 +235,64 @@ impl<Item: Copy + Default> CsrMatrix<Item> {
     pub fn op(&self) -> SparseMatOpIterator<Item, impl Iterator<Item = ([usize; 2], Item)> + '_> {
         SparseMatOpIterator::new(self.iter_aij_value(), self.shape())
     }
+
+    /// Construct the algebraic transpose in canonical CSR format.
+    ///
+    /// This costs `O(rows + columns + nnz)` time and duplicates the sparse
+    /// storage. It is preferable to [`Self::matmul_transpose`] when the
+    /// transpose is applied repeatedly, because subsequent products use the
+    /// normal row-wise CSR gather rather than a scattered write.
+    pub fn transpose(&self) -> Self {
+        let [rows, columns] = self.shape;
+        let nnz = self.data.len();
+        let mut transposed_indptr = vec![0usize; columns + 1];
+        for column in self.indices.iter_value() {
+            transposed_indptr[column + 1] += 1;
+        }
+        for index in 0..columns {
+            transposed_indptr[index + 1] += transposed_indptr[index];
+        }
+
+        let mut next = transposed_indptr[..columns].to_vec();
+        let mut transposed_indices = vec![0usize; nnz];
+        let mut transposed_data = vec![Item::default(); nnz];
+        for row in 0..rows {
+            for index in self.indptr[[row]]..self.indptr[[row + 1]] {
+                let column = self.indices[[index]];
+                let destination = next[column];
+                transposed_indices[destination] = row;
+                transposed_data[destination] = self.data[[index]];
+                next[column] += 1;
+            }
+        }
+
+        Self {
+            mat_type: SparseMatType::Csr,
+            shape: [columns, rows],
+            indices: DynArray::from_shape_and_vec([nnz], transposed_indices),
+            indptr: DynArray::from_shape_and_vec([columns + 1], transposed_indptr),
+            data: DynArray::from_shape_and_vec([nnz], transposed_data),
+        }
+    }
+}
+
+impl<Item> CsrMatrix<Item>
+where
+    Item: Default + Mul<Output = Item> + AddAssign<Item> + Copy,
+{
+    /// Apply the algebraic transpose to a dense vector.
+    pub fn matmul_transpose(&self, alpha: Item, x: &[Item], beta: Item, y: &mut [Item]) {
+        assert_eq!(x.len(), self.shape[0]);
+        assert_eq!(y.len(), self.shape[1]);
+        y.iter_mut().for_each(|value| *value = beta * *value);
+        for (row, &input) in x.iter().enumerate() {
+            let start = self.indptr[[row]];
+            let end = self.indptr[[row + 1]];
+            for index in start..end {
+                y[self.indices[[index]]] += alpha * self.data[[index]] * input;
+            }
+        }
+    }
 }
 
 impl<Item: Copy + Default> CsrMatrix<Item> {
@@ -411,6 +469,28 @@ mod test {
         let aij = CsrMatrix::from_aij([2, 3], &[0, 0, 0, 1], &[2, 0, 2, 1], &[1.0, 2.0, 3.0, 4.0]);
         let x = DynArray::from_shape_and_vec([3], vec![2.0, 3.0, 5.0]);
         crate::assert_array_relative_eq!(raw.dot(&x), aij.dot(&x), 1E-14);
+    }
+
+    #[test]
+    fn cached_transpose_matches_scatter_and_roundtrips() {
+        let matrix = CsrMatrix::from_aij(
+            [3, 4],
+            &[0, 0, 1, 2, 2],
+            &[0, 3, 1, 0, 2],
+            &[2.0, -1.0, 4.0, 3.0, 5.0],
+        );
+        let transpose = matrix.transpose();
+        assert_eq!(transpose.shape(), [4, 3]);
+        let x = [1.0, 2.0, -1.0];
+        let mut scattered = [0.0; 4];
+        matrix.matmul_transpose(1.0, &x, 0.0, &mut scattered);
+        let x = DynArray::from_shape_and_vec([3], x.to_vec());
+        crate::assert_array_relative_eq!(
+            transpose.dot(&x),
+            DynArray::from_shape_and_vec([4], scattered.to_vec()),
+            1E-14
+        );
+        crate::assert_array_relative_eq!(transpose.transpose().todense(), matrix.todense(), 1E-14);
     }
 
     #[test]

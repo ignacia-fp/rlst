@@ -21,6 +21,37 @@ use crate::{
     operator::{abstract_operator::Operator, element::Element, frame::orthogonalize_twice},
 };
 
+/// Why a GMRES iteration stopped.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GmresTermination {
+    /// The true residual satisfied the configured relative/absolute tolerance.
+    Converged,
+    /// The configured total Arnoldi-step limit was reached.
+    MaximumIterations,
+    /// The preconditioned residual or a Krylov pivot became numerically zero.
+    Breakdown,
+    /// A restart cycle failed to reduce the true residual.
+    Stagnation,
+}
+
+/// Structured result of a GMRES solve.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct GmresResult<Real> {
+    /// Final true relative residual, or absolute residual for a zero RHS.
+    pub residual: Real,
+    /// Total number of Arnoldi steps performed.
+    pub iterations: usize,
+    /// Reason the iteration stopped.
+    pub termination: GmresTermination,
+}
+
+impl<Real> GmresResult<Real> {
+    /// Whether the configured convergence criterion was satisfied.
+    pub fn converged(&self) -> bool {
+        self.termination == GmresTermination::Converged
+    }
+}
+
 /// Builder and in-place iteration for the generalized minimal residual method.
 ///
 /// GMRES applies to a general operator mapping an inner-product space to
@@ -48,7 +79,10 @@ pub struct GmresIteration<
     x: &'a mut Element<'b, Space>,
     max_iter: usize,
     restart: Option<usize>,
-    tol: Scalar::Real,
+    relative_tolerance: Scalar::Real,
+    absolute_tolerance: Scalar::Real,
+    #[allow(clippy::type_complexity)]
+    preconditioner: Option<Box<dyn Fn(&Element<'a, Space>, &mut Element<'a, Space>) + 'a>>,
     #[allow(clippy::type_complexity)]
     callable: Option<Box<dyn FnMut(usize, Scalar::Real) + 'a>>,
     #[allow(clippy::type_complexity)]
@@ -87,7 +121,9 @@ where
             x,
             max_iter: 1000,
             restart: None,
-            tol: num::cast(1E-6).unwrap(),
+            relative_tolerance: num::cast(1E-6).unwrap(),
+            absolute_tolerance: Zero::zero(),
+            preconditioner: None,
             callable: None,
             element_callable: None,
             print_debug: false,
@@ -137,7 +173,9 @@ where
             x: self.x,
             max_iter: self.max_iter,
             restart: self.restart,
-            tol: self.tol,
+            relative_tolerance: self.relative_tolerance,
+            absolute_tolerance: self.absolute_tolerance,
+            preconditioner: self.preconditioner,
             callable: self.callable,
             element_callable: self.element_callable,
             print_debug: self.print_debug,
@@ -150,8 +188,59 @@ where
     /// For a nonzero right-hand side, convergence is measured by the relative
     /// residual `||b - Ax|| / ||b||`. For a zero right-hand side, the absolute
     /// residual `||b - Ax||` is used instead. The default tolerance is 1E-6.
-    pub fn set_tol(mut self, tol: Scalar::Real) -> Self {
-        self.tol = tol;
+    pub fn set_tol(self, tol: Scalar::Real) -> Self {
+        self.set_relative_tolerance(tol)
+    }
+
+    /// Set the relative tolerance used by the SciPy-compatible true-residual
+    /// stopping rule `||b - A x|| <= max(rtol ||b||, atol)`.
+    pub fn set_relative_tolerance(mut self, tolerance: Scalar::Real) -> Self {
+        assert!(
+            tolerance >= Zero::zero(),
+            "relative tolerance must be nonnegative"
+        );
+        self.relative_tolerance = tolerance;
+        self
+    }
+
+    /// Set the absolute tolerance used by the SciPy-compatible true-residual
+    /// stopping rule. The default is zero.
+    pub fn set_absolute_tolerance(mut self, tolerance: Scalar::Real) -> Self {
+        assert!(
+            tolerance >= Zero::zero(),
+            "absolute tolerance must be nonnegative"
+        );
+        self.absolute_tolerance = tolerance;
+        self
+    }
+
+    /// Set a left preconditioner approximating `A^{-1}`.
+    ///
+    /// The Arnoldi process minimizes `||M (b - A x)||`, while convergence is
+    /// always decided from the unpreconditioned true residual, matching
+    /// `scipy.sparse.linalg.gmres`.
+    pub fn set_preconditioner<PrecImpl>(mut self, preconditioner: &'a Operator<PrecImpl>) -> Self
+    where
+        PrecImpl: OperatorBase<Domain = Space, Range = Space> + 'a,
+        Scalar: One + Zero,
+    {
+        self.preconditioner = Some(Box::new(move |value, output| {
+            preconditioner.apply(One::one(), value, Zero::zero(), output);
+        }));
+        self
+    }
+
+    /// Set an allocation-free left-preconditioner application callback.
+    ///
+    /// The callback must overwrite `output` with the preconditioned `value`.
+    /// This is the native interface used internally; [`Self::set_preconditioner`]
+    /// adapts any RLST operator to it. It also permits matrix-free callers to
+    /// reuse backend workspaces instead of constructing an operator wrapper.
+    pub fn set_preconditioner_apply(
+        mut self,
+        apply: impl Fn(&Element<'a, Space>, &mut Element<'a, Space>) + 'a,
+    ) -> Self {
+        self.preconditioner = Some(Box::new(apply));
         self
     }
 
@@ -249,7 +338,15 @@ where
     ///
     /// Panics if a frame supplied through [`Self::set_storage`] rejects a
     /// Krylov basis vector or the candidate that is orthogonalized against it.
-    pub fn run(mut self) -> Scalar::Real {
+    pub fn run(self) -> Scalar::Real {
+        self.run_with_result().residual
+    }
+
+    /// Run GMRES and return convergence status, iteration count, and residual.
+    ///
+    /// This is the primary result-oriented API. [`Self::run`] remains as a
+    /// compatibility convenience for callers that only need the residual.
+    pub fn run_with_result(mut self) -> GmresResult<Scalar::Real> {
         fn print_success<T: RlstScalar>(it_count: usize, rel_res: T) {
             println!(
                 "GMRES converged in {it_count} iterations with relative residual {rel_res:+E}."
@@ -266,6 +363,9 @@ where
         let one_real = <Scalar::Real as One>::one();
 
         let rhs_norm = Norm::norm(self.rhs);
+        let convergence_threshold = self
+            .absolute_tolerance
+            .max(self.relative_tolerance * rhs_norm);
 
         let mut res = self.rhs.clone();
         self.operator
@@ -278,17 +378,25 @@ where
             if self.print_debug {
                 print_success(0, residual);
             }
-            return residual;
+            return GmresResult {
+                residual,
+                iterations: 0,
+                termination: GmresTermination::Converged,
+            };
         }
 
         let use_absolute_residual = rhs_norm == zero_real;
         let mut reported_residual = report(residual, rhs_norm, use_absolute_residual);
 
-        if reported_residual < self.tol {
+        if residual <= convergence_threshold {
             if self.print_debug {
                 print_success(0, reported_residual);
             }
-            return reported_residual;
+            return GmresResult {
+                residual: reported_residual,
+                iterations: 0,
+                termination: GmresTermination::Converged,
+            };
         }
 
         let restart = self.restart.unwrap_or(self.max_iter).max(1);
@@ -296,13 +404,33 @@ where
         // The frame grows geometrically as basis vectors are pushed. Reserving
         // the whole restart length up front would allocate for `max_iter`
         // elements even when the iteration converges after a few steps.
+        let preconditioner = &self.preconditioner;
         let frame = &mut self.storage;
 
         let mut total_iter = 0usize;
 
         while total_iter < self.max_iter {
             // `res` holds `b - Ax` and `residual` its norm, both for the current `x`.
-            let beta = residual;
+            let previous_residual = residual;
+            let preconditioned_residual = match preconditioner.as_ref() {
+                Some(apply) => {
+                    let mut output = self.rhs.space().zero();
+                    apply(&res, &mut output);
+                    output
+                }
+                None => res.clone(),
+            };
+            let beta = Norm::norm(&preconditioned_residual);
+            if beta == zero_real {
+                if self.print_debug {
+                    print_fail(total_iter, reported_residual);
+                }
+                return GmresResult {
+                    residual: reported_residual,
+                    iterations: total_iter,
+                    termination: GmresTermination::Breakdown,
+                };
+            }
             // Kept so that a cycle which fails to reduce the true residual can
             // be undone.
             let previous_x = self.x.clone();
@@ -318,7 +446,7 @@ where
             // The normalized residual is the first basis vector. `res` is
             // rebuilt from the operator at the end of the cycle.
             frame.clear();
-            let mut basis_vector = res;
+            let mut basis_vector = preconditioned_residual;
             basis_vector *= Scalar::from_real(one_real / beta);
             frame
                 .push(&basis_vector)
@@ -330,7 +458,15 @@ where
             // basis vectors at the top of each step, and exactly
             // `hessenberg.len()` once the cycle ends.
             for step in 0..cycle_length {
-                let mut candidate = self.operator.dot(&basis_vector);
+                let applied = self.operator.dot(&basis_vector);
+                let mut candidate = match preconditioner.as_ref() {
+                    Some(apply) => {
+                        let mut output = self.rhs.space().zero();
+                        apply(&applied, &mut output);
+                        output
+                    }
+                    None => applied,
+                };
                 // For an orthonormal basis this is the norm of the new
                 // Hessenberg column, which the rotations preserve. Both
                 // breakdown tests are relative to it.
@@ -400,7 +536,12 @@ where
                     callable(&current, &current_residual);
                 }
 
-                if estimate < self.tol {
+                let estimated_absolute = if use_absolute_residual {
+                    g[step + 1].abs()
+                } else {
+                    estimate * rhs_norm
+                };
+                if estimated_absolute <= convergence_threshold {
                     break;
                 }
 
@@ -440,22 +581,30 @@ where
             residual = Norm::norm(&res);
             reported_residual = report(residual, rhs_norm, use_absolute_residual);
 
-            if reported_residual < self.tol {
+            if residual <= convergence_threshold {
                 if self.print_debug {
                     print_success(total_iter, reported_residual);
                 }
-                return reported_residual;
+                return GmresResult {
+                    residual: reported_residual,
+                    iterations: total_iter,
+                    termination: GmresTermination::Converged,
+                };
             }
 
-            if residual >= beta || !residual.is_finite() {
+            if residual >= previous_residual || !residual.is_finite() {
                 // The cycle did not improve on its starting point, so another
                 // cycle from the same state cannot either. Undo it.
                 *self.x = previous_x;
-                reported_residual = report(beta, rhs_norm, use_absolute_residual);
+                reported_residual = report(previous_residual, rhs_norm, use_absolute_residual);
                 if self.print_debug {
                     print_fail(total_iter, reported_residual);
                 }
-                return reported_residual;
+                return GmresResult {
+                    residual: reported_residual,
+                    iterations: total_iter,
+                    termination: GmresTermination::Stagnation,
+                };
             }
 
             if residual == zero_real {
@@ -464,14 +613,22 @@ where
                 if self.print_debug {
                     print_success(total_iter, reported_residual);
                 }
-                return reported_residual;
+                return GmresResult {
+                    residual: reported_residual,
+                    iterations: total_iter,
+                    termination: GmresTermination::Converged,
+                };
             }
         }
 
         if self.print_debug {
             print_fail(total_iter, reported_residual);
         }
-        reported_residual
+        GmresResult {
+            residual: reported_residual,
+            iterations: total_iter,
+            termination: GmresTermination::MaximumIterations,
+        }
     }
 }
 
@@ -559,8 +716,11 @@ mod test {
         base_types::c64,
         dense::array::DynArray,
         operator::{
-            abstract_operator::Operator, algorithms::gmres::GmresIteration, element::Element,
-            interface::array_vector_space::ArrayVectorSpace, space::zero_element,
+            abstract_operator::Operator,
+            algorithms::gmres::{GmresIteration, GmresTermination},
+            element::Element,
+            interface::array_vector_space::ArrayVectorSpace,
+            space::zero_element,
         },
     };
 
@@ -675,6 +835,25 @@ mod test {
         assert_eq!(residual, 0.0);
         assert!(residual.is_finite());
         assert_eq!(callback_count.get(), 0);
+    }
+
+    #[test]
+    fn structured_result_reports_convergence_and_iterations() {
+        let mut mat = DynArray::<f64, 2>::from_shape([2, 2]);
+        mat.set_identity();
+        let op = Operator::from(&mat);
+        let mut rhs = zero_element(op.range());
+        rhs.imp_mut()[[0]] = 1.0;
+        let mut x = zero_element(op.domain());
+
+        let result = GmresIteration::new(&op, &rhs, &mut x)
+            .set_tol(1E-12)
+            .run_with_result();
+
+        assert!(result.converged());
+        assert_eq!(result.termination, GmresTermination::Converged);
+        assert_eq!(result.iterations, 1);
+        assert!(result.residual < 1E-12);
     }
 
     #[test]
@@ -886,6 +1065,87 @@ mod test {
             .set_tol(tol)
             .run();
         assert!(dense_residual < tol);
+    }
+
+    #[test]
+    fn left_preconditioned_restart_matches_scipy_reference() {
+        // Reference generated with SciPy 1.17.1 using
+        // callback_type="pr_norm", restart=2, rtol=1e-12 and atol=0.
+        let mut matrix = DynArray::<f64, 2>::from_shape([4, 4]);
+        let values = [
+            [4.0, 1.0, 0.0, 0.0],
+            [-1.0, 3.0, 1.0, 0.0],
+            [0.0, -1.0, 2.0, 1.0],
+            [0.0, 0.0, -1.0, 2.0],
+        ];
+        for row in 0..4 {
+            for column in 0..4 {
+                matrix[[row, column]] = values[row][column];
+            }
+        }
+        let mut inverse_diagonal = DynArray::<f64, 2>::from_shape([4, 4]);
+        inverse_diagonal[[0, 0]] = 0.25;
+        inverse_diagonal[[1, 1]] = 1.0 / 3.0;
+        inverse_diagonal[[2, 2]] = 0.5;
+        inverse_diagonal[[3, 3]] = 0.5;
+        let operator = Operator::from(&matrix);
+        let preconditioner = Operator::from(&inverse_diagonal);
+        let mut rhs = zero_element(operator.range());
+        for (index, value) in [6.0, 8.0, 8.0, 5.0].into_iter().enumerate() {
+            rhs.imp_mut()[[index]] = value;
+        }
+        let mut solution = zero_element(operator.domain());
+        let history = RefCell::new(Vec::<f64>::new());
+        let expected = [
+            1.60402360e-01,
+            6.00204074e-02,
+            2.58293456e-02,
+            8.72201419e-03,
+            4.01853768e-03,
+            1.57971411e-03,
+            6.93128123e-04,
+            2.02064596e-04,
+            9.17530922e-05,
+            3.74926646e-05,
+            1.54394469e-05,
+            5.39763515e-06,
+            2.10861922e-06,
+            8.33751773e-07,
+            3.60598809e-07,
+            1.43855499e-07,
+            5.77932233e-08,
+            1.77994553e-08,
+            8.46562325e-09,
+            3.14914611e-09,
+            1.34481040e-09,
+            4.68225273e-10,
+            1.91383977e-10,
+            6.81550556e-11,
+            2.91430754e-11,
+            1.22151506e-11,
+            4.92478433e-12,
+            1.52841707e-12,
+            6.99706847e-13,
+            2.59873713e-13,
+        ];
+
+        let residual = GmresIteration::new(&operator, &rhs, &mut solution)
+            .set_preconditioner(&preconditioner)
+            .set_restart(2)
+            .set_max_iter(40)
+            .set_relative_tolerance(1.0e-12)
+            .set_absolute_tolerance(0.0)
+            .set_callable(|_, value| history.borrow_mut().push(value))
+            .run();
+
+        assert!(residual < 1.0e-12);
+        assert_eq!(history.borrow().len(), expected.len());
+        for (&actual, expected) in history.borrow().iter().zip(expected) {
+            assert_relative_eq!(actual, expected, max_relative = 5.0e-8, epsilon = 2.0e-13);
+        }
+        for (actual, expected) in solution.imp().iter_value().zip([1.0, 2.0, 3.0, 4.0]) {
+            assert_relative_eq!(actual, expected, epsilon = 2.0e-11);
+        }
     }
 
     #[test]
